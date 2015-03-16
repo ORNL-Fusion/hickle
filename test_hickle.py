@@ -11,6 +11,26 @@ Unit tests for hickle module.
 import os
 from hickle import *
 import unicodedata
+import hashlib
+import time
+
+NESTED_DICT = {
+        "level1_1" : {
+            "level2_1" : [1, 2, 3],
+            "level2_2" : [4, 5, 6]
+        },
+        "level1_2" : {
+            "level2_1" : [1, 2, 3],
+            "level2_2" : [4, 5, 6]
+        },
+        "level1_3" : {
+            "level2_1" : {
+                "level3_1" : [1, 2, 3],
+                "level3_2" : [4, 5, 6]
+            },
+            "level2_2" : [4, 5, 6]
+        }
+    }
 
 def test_string():
     """ Dumping and loading a string """
@@ -198,23 +218,7 @@ def test_dict_nested():
     """ Test for dictionaries with integer keys """
     filename, mode = 'test.h5', 'w'
 
-    dd = {
-        "level1_1" : {
-            "level2_1" : [1, 2, 3],
-            "level2_2" : [4, 5, 6]
-        },
-        "level1_2" : {
-            "level2_1" : [1, 2, 3],
-            "level2_2" : [4, 5, 6]            
-        },
-        "level1_3" : {
-            "level2_1" : {
-                "level3_1" : [1, 2, 3],
-                "level3_2" : [4, 5, 6]                     
-            },
-            "level2_2" : [4, 5, 6]            
-        }
-    }
+    dd = NESTED_DICT
 
     dump(dd, filename, mode)
     dd_hkl = load(filename)
@@ -273,6 +277,153 @@ def test_nomatch():
     assert type(dd_hkl) == type(dd) == Exception
     os.remove(filename)
 
+def test_np_float():
+    """ Test for singular np dtypes """
+    filename, mode = 'np_float.h5', 'w'    
+    
+    dtype_list = (np.float16, np.float32, np.float64, 
+                  np.complex64, np.complex128,
+                  np.int8, np.int16, np.int32, np.int64,
+                  np.uint8, np.uint16, np.uint32, np.uint64)
+                  
+    for dt in dtype_list:
+    
+        dd = dt(1)
+        dump(dd, filename, mode)
+        dd_hkl = load(filename)  
+        assert dd == dd_hkl
+        assert dd.dtype == dd_hkl.dtype
+        os.remove(filename)
+
+    dd = {}
+    for dt in dtype_list:
+        dd[str(dt)] = dt(1.0)
+    dump(dd, filename, mode)
+    dd_hkl = load(filename)
+
+    #print dd
+    for dt in dtype_list:
+        assert dd[str(dt)] == dd_hkl[str(dt)]
+
+    os.remove(filename)
+
+def md5sum(filename, blocksize=65536):
+    """ Compute MD5 sum for a given file """
+    hash = hashlib.md5()
+    with open(filename, "r+b") as f:
+        for block in iter(lambda: f.read(blocksize), ""):
+            hash.update(block)
+    return hash.hexdigest()
+
+def caching_dump(obj, filename, mode, **kwargs):
+    """ Save arguments of all dump calls"""
+    dump_cache.append((obj, filename, mode, kwargs))
+    return hickle_dump(obj, filename, mode, **kwargs)
+
+def test_track_times():
+    """ Verify that track_times = False produces identical files"""
+    hashes = []
+    for obj, filename, mode, kwargs in dump_cache:
+        kwargs['track_times'] = False
+        hickle_dump(obj, filename, mode, **kwargs)
+        hashes.append(md5sum(filename))
+        os.remove(filename)
+
+    time.sleep(1)
+
+    for hash1, (obj, filename, mode, kwargs) in zip(hashes, dump_cache):
+        hickle_dump(obj, filename, mode, **kwargs)
+        hash2 = md5sum(filename)
+        print hash1, hash2
+        try:
+            assert hash1 == hash2
+            os.remove(filename)
+        except AssertionError:
+            os.remove(filename)
+            raise
+
+
+def test_comp_kwargs():
+    """ Test compression with some kwargs for shuffle and chunking """
+
+    filename, mode = 'test.h5', 'w'
+    dtypes = ['int32', 'float32', 'float64', 'complex64', 'complex128']
+
+    comps = [None, 'gzip', 'lzf']
+    chunks = [(100, 100), (250, 250)]
+    shuffles = [True, False]
+    scaleoffsets = [0, 1, 2]
+
+    for dt in dtypes:
+        for cc in comps:
+            for ch in chunks:
+                for sh in shuffles:
+                    for so in scaleoffsets:
+                        kwargs = {
+                            'compression' : cc,
+                            'dtype': dt,
+                            'chunks': ch,
+                            'shuffle': sh,
+                            'scaleoffset': so
+                        }
+                        #array_obj = np.random.random_integers(low=-8192, high=8192, size=(1000, 1000)).astype(dt)
+                        array_obj = NESTED_DICT
+                        dump(array_obj, filename, mode, compression=cc)
+                        print kwargs, os.path.getsize(filename)
+                        array_hkl = load(filename)
+    try:
+        os.remove(filename)
+    except AssertionError:
+        os.remove(filename)
+        print array_hkl
+        print array_obj
+        raise
+
+def test_list_numpy():
+    """ Test converting a list of numpy arrays """
+
+    filename, mode = 'test.h5', 'w'
+
+    a = np.ones(1024)
+    b = np.zeros(1000)
+    c = [a, b]
+
+    dump(c, filename, mode)
+    dd_hkl = load(filename)
+
+    print dd_hkl
+
+    assert isinstance(dd_hkl, list)
+    assert isinstance(dd_hkl[0], np.ndarray)
+
+
+    os.remove(filename)
+
+def test_tuple_numpy():
+    """ Test converting a list of numpy arrays """
+
+    filename, mode = 'test.h5', 'w'
+
+    a = np.ones(1024)
+    b = np.zeros(1000)
+    c = (a, b, a)
+
+    dump(c, filename, mode)
+    dd_hkl = load(filename)
+
+    print dd_hkl
+
+    assert isinstance(dd_hkl, tuple)
+    assert isinstance(dd_hkl[0], np.ndarray)
+
+
+    os.remove(filename)
+
+
+dump_cache = []
+hickle_dump = dump
+dump = caching_dump
+
 if __name__ == '__main__':
   """ Some tests and examples"""
   test_unicode()
@@ -287,6 +438,12 @@ if __name__ == '__main__':
   test_dict_int_key()
   test_dict_nested()
   test_nomatch()
+  test_np_float()
+  test_track_times()
+  time.sleep(2)
+  test_comp_kwargs()
+  test_list_numpy()
+  test_tuple_numpy()
   
   print "ALL TESTS PASSED!"
   
